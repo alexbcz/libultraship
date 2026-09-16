@@ -416,10 +416,14 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
     // the mutex.
     std::variant<ResourceLoadError, std::shared_ptr<IResource>> value = nullptr;
     size_t ret = 0;
-    // We can only erase the resource if we have any resources for that owner.
-    if (mResourceCache.contains(identifier)) {
+    {
         const std::lock_guard<std::mutex> lock(mMutex);
-        mResourceCache.erase(identifier);
+        auto it = mResourceCache.find(identifier);
+        if (it != mResourceCache.end()) {
+            value = std::move(it->second);
+            mResourceCache.erase(it);
+            ret = 1;
+        }
     }
 
     return ret;
@@ -427,6 +431,25 @@ size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
 
 size_t ResourceManager::UnloadResource(const std::string& filePath) {
     return UnloadResource({ filePath, mDefaultCacheOwner, mDefaultCacheArchive });
+}
+
+size_t ResourceManager::UnloadUnreferencedResources(const std::string& prefix, uint32_t resourceType) {
+    std::vector<std::shared_ptr<IResource>> removed;
+    {
+        const std::lock_guard<std::mutex> lock(mMutex);
+        for (auto it = mResourceCache.begin(); it != mResourceCache.end();) {
+            auto resource = std::get_if<std::shared_ptr<IResource>>(&it->second);
+            if (it->first.Path.starts_with(prefix) && resource && *resource && resource->use_count() == 1 &&
+                (*resource)->GetInitData()->Type == resourceType) {
+                removed.push_back(std::move(*resource));
+                it = mResourceCache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    // Destructors can call back into the resource manager; release outside the lock.
+    return removed.size();
 }
 
 void ResourceManager::CacheExternalResource(const std::string& filePath, std::shared_ptr<IResource> resource) {

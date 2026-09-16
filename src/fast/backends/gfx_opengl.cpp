@@ -576,6 +576,18 @@ GLuint GfxRenderingAPIOGL::NewTexture() {
 
 void GfxRenderingAPIOGL::DeleteTexture(uint32_t texID) {
     glDeleteTextures(1, &texID);
+    // Deleted names may be reused. Do not skip the next bind for a recycled ID.
+    for (int i = 0; i < SHADER_MAX_TEXTURES; ++i) {
+        if (mLastBoundTextures[i] == texID) {
+            mLastBoundTextures[i] = 0;
+        }
+        if (mCurrentTextureIds[i] == texID) {
+            mCurrentTextureIds[i] = 0;
+        }
+    }
+    if (texID < textures.size()) {
+        textures[texID] = {};
+    }
 }
 
 void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {

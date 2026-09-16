@@ -407,6 +407,9 @@ class ResourceManager {
      */
     void* GetResourceRawPointer(uint64_t crc);
 
+    // Caller must also ensure no game-side raw pointers remain in use.
+    size_t UnloadUnreferencedResources(const std::string& prefix, uint32_t resourceType);
+
   protected:
     std::shared_ptr<std::vector<std::shared_ptr<IResource>>> LoadResourcesProcess(const ResourceFilter& filter);
     void UnloadResourcesProcess(const ResourceFilter& filter);

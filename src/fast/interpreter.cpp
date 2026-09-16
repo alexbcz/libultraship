@@ -492,6 +492,22 @@ void Interpreter::ShaderCacheClear() {
     mRapi->ClearShaderCache();
 }
 
+// Only call between game states, after the last display list has completed.
+void Interpreter::ReleaseTextureCache() {
+    TextureCacheClear();
+    for (auto id : mTextureCache.free_texture_ids) {
+        mRapi->DeleteTexture(id);
+    }
+    mTextureCache.free_texture_ids.clear();
+    mRdp->texture_to_load = {};
+    for (auto& texture : mRdp->loaded_texture) {
+        texture = {};
+    }
+    std::fill(std::begin(mRdp->textures_changed), std::end(mRdp->textures_changed), true);
+    std::fill(std::begin(mRdp->palettes), std::end(mRdp->palettes), nullptr);
+    std::fill(std::begin(mRdp->palette_dram_addr), std::end(mRdp->palette_dram_addr), nullptr);
+}
+
 bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     TextureCacheMap::iterator it = mTextureCache.map.find(key);
     TextureCacheNode** n = &mRenderingState.mTextures[i];
