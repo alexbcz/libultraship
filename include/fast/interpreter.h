@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "fast/lus_gbi.h"
+#include "fast/ColorCombinerKey.h"
 #include "fast/types.h"
 #include "fast/ucodehandlers.h"
 #include "backends/gfx_rendering_api.h"
@@ -86,16 +87,6 @@ enum class ShaderOpts {
 
 #define SHADER_OPT(opt) ((uint64_t)(1 << static_cast<int>(ShaderOpts::opt)))
 #endif
-
-struct ColorCombinerKey {
-    uint64_t combine_mode;
-    uint64_t options;
-    uint64_t shader_id;
-
-#ifdef __cplusplus
-    auto operator<=>(const ColorCombinerKey&) const = default;
-#endif
-};
 
 #define SHADER_MAX_TEXTURES 6
 #define SHADER_FIRST_TEXTURE 0

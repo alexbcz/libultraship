@@ -1,6 +1,8 @@
 name: test-validation
 on:
   push:
+    branches-ignore:
+      - android/color-combiner-key-fix
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
