@@ -41,6 +41,9 @@
 #include "libultraship/libultra/os.h"
 
 #include <spdlog/fmt/fmt.h>
+#ifdef __ANDROID__
+#include "ship/port/mobile/MobileImpl.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -4138,7 +4141,21 @@ bool gfx_set_timg_otr_filepath_handler_custom(F3DGfx** cmd0) {
         gfx->GfxDpSetTextureImage(fmt, size, width, fileName, texFlags, rawTexMetadata,
                                   reinterpret_cast<char*>(texture->ImageData));
     } else {
+#ifdef __ANDROID__
+        // Bound both storage and output when malformed packs request many paths.
+        static std::set<std::string> reportedPaths;
+        if (reportedPaths.size() < 64) {
+            const std::string path(fileName, strnlen(fileName, 256));
+            if (reportedPaths.insert(path).second) {
+                SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null: {}", path);
+                if (reportedPaths.size() == 64) {
+                    SPDLOG_WARN("Missing-texture path limit reached; suppressing further reports");
+                }
+            }
+        }
+#else
         SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null");
+#endif
     }
     return false;
 }
@@ -5081,6 +5098,10 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
+#ifdef __ANDROID__
+    Ship::Mobile::InitThreadDiagnostics();
+    Ship::Mobile::LogMemorySample(mColorCombinerPool.size());
+#endif
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <string>
 
 #include <imgui.h>
@@ -20,6 +21,8 @@ class Mobile {
 #ifdef __ANDROID__
     static bool ConsumeGamepadBackPress();
     static void SetCrashContext(const char* context);
+    static void InitThreadDiagnostics();
+    static void LogMemorySample(size_t combinerCount);
 #endif
 };
 }; // namespace Ship

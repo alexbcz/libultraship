@@ -3,6 +3,7 @@ on:
   push:
     branches-ignore:
       - android/color-combiner-key-fix
+      - android/rc3-diagnostics
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
