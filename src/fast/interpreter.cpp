@@ -1942,7 +1942,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         cc_options |= SHADER_OPT(TEXEL1_BLEND);
     }
 
-    ColorCombinerKey key;
+    ColorCombinerKey key{};
     key.combine_mode = mRdp->combine_mode;
     key.options = cc_options;
 
