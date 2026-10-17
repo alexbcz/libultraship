@@ -1,3 +1,7 @@
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <chrono>
+#endif
 #define NOMINMAX
 
 #include <math.h>
@@ -5225,6 +5229,24 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
 }
 
 void Interpreter::EndFrame() {
+#ifdef __ANDROID__
+    static thread_local auto nextLog =
+        std::chrono::steady_clock::time_point::min();
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now >= nextLog) {
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            "2ShipCombiner",
+            "pool_size=%zu",
+            mColorCombinerPool.size()
+        );
+
+        nextLog = now + std::chrono::seconds(30);
+    }
+#endif
+
     mRapi->EndFrame();
     mWapi->SwapBuffersBegin();
     mRapi->FinishRender();
