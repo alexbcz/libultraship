@@ -155,7 +155,14 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
     auto file = LoadFileProcess(identifier.Path);
     if (file == nullptr && !mArchiveManager->HasFile(identifier.Path + ".meta")) {
         SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
-        mResourceCache[identifier] = ResourceLoadError::NotFound;
+        // A concurrent loader may have populated this entry while we checked the archive.
+        const std::lock_guard<std::mutex> lock(mMutex);
+        auto [entry, inserted] = mResourceCache.try_emplace(identifier, ResourceLoadError::NotFound);
+        if (auto cached = std::get_if<std::shared_ptr<IResource>>(&entry->second)) {
+            if (*cached != nullptr && !(*cached)->IsDirty()) {
+                return *cached;
+            }
+        }
         return nullptr;
     }
 

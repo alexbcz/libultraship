@@ -191,6 +191,8 @@ typedef std::pair<const TextureCacheKey, struct TextureCacheValue> TextureCacheN
 
 struct TextureCacheValue {
     uint32_t texture_id;
+    uint64_t storage_bytes = 0;
+    uint64_t last_used_frame = 0;
     uint8_t cms, cmt;
     bool linear_filter;
 
@@ -412,6 +414,8 @@ class Interpreter {
     void ShaderCacheClear();
     void TextureCacheClear();
     void ReleaseTextureCache();
+    void UploadCachedTexture(const uint8_t* pixels, uint32_t width, uint32_t height);
+    void TrimTextureCache();
     std::shared_ptr<Ship::IResource> ResolveResourceCached(const char* path);
     bool TextureCacheLookup(int i, const TextureCacheKey& key);
     void TextureCacheDelete(const uint8_t* origAddr);
@@ -499,6 +503,12 @@ class Interpreter {
     RenderingState mRenderingState{};
 
     GfxTextureCache mTextureCache{};
+    TextureCacheNode* mUploadingTexture = nullptr;
+    uint64_t mTextureFrame = 0;
+    uint64_t mTextureBudgetBytes = 0;
+    uint64_t mTextureHits = 0;
+    uint64_t mTextureMisses = 0;
+    uint64_t mTextureEvictions = 0;
     std::unordered_map<const void*, std::shared_ptr<Ship::IResource>> mResolvedResourceCache;
     bool mResolvedResourceCacheEnabled = false;
     std::map<ColorCombinerKey, ColorCombiner> mColorCombinerPool; // color_combiner_pool;
