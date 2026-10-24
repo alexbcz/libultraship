@@ -437,7 +437,13 @@ void ConsoleWindow::DrawElement() {
     ImGui::PopItemWidth();
 
     // Renders console history
-    const float footerHeightToReserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+    float footerHeightToReserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+#if defined(__ANDROID__)
+    // Android has a full-width command field and a separate full-width Submit button.
+    if (mCurrentChannel == "Console") {
+        footerHeightToReserve += ImGui::GetFrameHeightWithSpacing();
+    }
+#endif
     ImGui::BeginChild("ScrollingRegion", ImVec2(0, -footerHeightToReserve), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(.3f, .3f, .3f, 1.0f));
@@ -498,7 +504,11 @@ void ConsoleWindow::DrawElement() {
         constexpr ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackEdit |
                                               ImGuiInputTextFlags_CallbackCompletion |
                                               ImGuiInputTextFlags_CallbackHistory;
+#if defined(__ANDROID__)
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+#else
         ImGui::PushItemWidth(-53.0f);
+#endif
 
         float yBeforeInput = ImGui::GetCursorPosY();
 
@@ -515,7 +525,9 @@ void ConsoleWindow::DrawElement() {
             if (ImGui::IsItemFocused()) {
                 // Place the tooltip above the console input field
                 ImGui::SetNextWindowPos(ImVec2(pos.x, pos.y + size.y - ((size.y - yBeforeInput) * 2)));
+#if !defined(__ANDROID__)
                 ImGui::SameLine();
+#endif
                 ImGui::BeginTooltip();
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
                 ImGui::TextUnformatted(mCmdHint.c_str());
@@ -524,10 +536,14 @@ void ConsoleWindow::DrawElement() {
             }
         }
 
+#if defined(__ANDROID__)
+        const bool submitClicked = ImGui::Button("Submit", ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
+#else
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 50);
-
-        if (ImGui::Button("Submit") && !inputFocus && mInputBuffer[0] != '\0' && mInputBuffer[0] != ' ') {
+        const bool submitClicked = ImGui::Button("Submit");
+#endif
+        if (submitClicked && !inputFocus && mInputBuffer[0] != '\0' && mInputBuffer[0] != ' ') {
             Dispatch(std::string(mInputBuffer));
             memset(mInputBuffer, 0, gMaxBufferSize);
         }
