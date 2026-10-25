@@ -48,12 +48,12 @@ std::shared_ptr<File> ArchiveManager::LoadFile(const std::string& filePath) {
 }
 
 std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
-    auto archive = mFileToArchive[hash];
-    if (archive == nullptr) {
+    auto entry = mFileToArchive.find(hash);
+    if (entry == mFileToArchive.end() || entry->second == nullptr) {
         return nullptr;
     }
 
-    return archive->LoadFile(hash);
+    return entry->second->LoadFile(hash);
 }
 
 bool ArchiveManager::HasFile(const std::string& filePath) {
@@ -61,11 +61,13 @@ bool ArchiveManager::HasFile(const std::string& filePath) {
 }
 
 bool ArchiveManager::HasFile(uint64_t hash) {
-    return mFileToArchive.count(hash) > 0;
+    auto entry = mFileToArchive.find(hash);
+    return entry != mFileToArchive.end() && entry->second != nullptr;
 }
 
 std::shared_ptr<Archive> ArchiveManager::GetArchiveFromFile(const std::string& filePath) {
-    return mFileToArchive[CRC64(filePath.c_str())];
+    auto entry = mFileToArchive.find(CRC64(filePath.c_str()));
+    return entry == mFileToArchive.end() ? nullptr : entry->second;
 }
 
 int32_t ArchiveManager::GetFilePriority(const std::string& filePath) {

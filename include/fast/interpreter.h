@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "fast/lus_gbi.h"
+#include "fast/ColorCombinerKey.h"
 #include "fast/types.h"
 #include "fast/ucodehandlers.h"
 #include "backends/gfx_rendering_api.h"
@@ -86,16 +87,6 @@ enum class ShaderOpts {
 
 #define SHADER_OPT(opt) ((uint64_t)(1 << static_cast<int>(ShaderOpts::opt)))
 #endif
-
-struct ColorCombinerKey {
-    uint64_t combine_mode;
-    uint64_t options;
-    uint64_t shader_id;
-
-#ifdef __cplusplus
-    auto operator<=>(const ColorCombinerKey&) const = default;
-#endif
-};
 
 #define SHADER_MAX_TEXTURES 6
 #define SHADER_FIRST_TEXTURE 0
@@ -200,6 +191,8 @@ typedef std::pair<const TextureCacheKey, struct TextureCacheValue> TextureCacheN
 
 struct TextureCacheValue {
     uint32_t texture_id;
+    uint64_t storage_bytes = 0;
+    uint64_t last_used_frame = 0;
     uint8_t cms, cmt;
     bool linear_filter;
 
@@ -420,6 +413,9 @@ class Interpreter {
     ColorCombiner* LookupOrCreateColorCombiner(const ColorCombinerKey& key);
     void ShaderCacheClear();
     void TextureCacheClear();
+    void ReleaseTextureCache();
+    void UploadCachedTexture(const uint8_t* pixels, uint32_t width, uint32_t height);
+    void TrimTextureCache();
     std::shared_ptr<Ship::IResource> ResolveResourceCached(const char* path);
     bool TextureCacheLookup(int i, const TextureCacheKey& key);
     void TextureCacheDelete(const uint8_t* origAddr);
@@ -507,6 +503,12 @@ class Interpreter {
     RenderingState mRenderingState{};
 
     GfxTextureCache mTextureCache{};
+    TextureCacheNode* mUploadingTexture = nullptr;
+    uint64_t mTextureFrame = 0;
+    uint64_t mTextureBudgetBytes = 0;
+    uint64_t mTextureHits = 0;
+    uint64_t mTextureMisses = 0;
+    uint64_t mTextureEvictions = 0;
     std::unordered_map<const void*, std::shared_ptr<Ship::IResource>> mResolvedResourceCache;
     bool mResolvedResourceCacheEnabled = false;
     std::map<ColorCombinerKey, ColorCombiner> mColorCombinerPool; // color_combiner_pool;

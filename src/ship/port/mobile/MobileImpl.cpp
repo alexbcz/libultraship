@@ -42,6 +42,13 @@ void Ship::Mobile::ImGuiProcessEvent(bool wantsTextInput) {
 #include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <malloc.h>
+#include <chrono>
+#include <cstdio>
+#include <spdlog/spdlog.h>
+#include "ship/port/mobile/CrashFrameWalker.h"
 
 namespace {
 
@@ -53,6 +60,36 @@ char sCrashReportPath[CRASH_REPORT_PATH_SIZE] = {};
 char sCrashVersion[CRASH_VERSION_SIZE] = {};
 char sCrashContext[CRASH_CONTEXT_SIZE] = {};
 volatile sig_atomic_t sHandlingCrash = 0;
+struct sigaction sPreviousHandlers[NSIG] = {};
+bool sHandlersInstalled = false;
+
+// Installed separately on each participating thread, especially SDLThread.
+struct ThreadDiagnostics {
+    uintptr_t stackLow = 0;
+    uintptr_t stackHigh = 0;
+    void* alternateStack = MAP_FAILED;
+    int memoryFd = -1;
+    bool initialized = false;
+    size_t alternateBytes = 0;
+    static constexpr size_t alternateSize = 128 * 1024;
+};
+// Keep signal-handler TLS trivially initialized, even on an unregistered thread.
+thread_local ThreadDiagnostics sThreadDiagnostics;
+struct ThreadDiagnosticsLifetime {
+    ~ThreadDiagnosticsLifetime() {
+        auto& state = sThreadDiagnostics;
+        if (state.alternateStack != MAP_FAILED) {
+            stack_t disabled = {};
+            disabled.ss_flags = SS_DISABLE;
+            if (sigaltstack(&disabled, nullptr) == 0) {
+                munmap(state.alternateStack, ThreadDiagnostics::alternateSize);
+            }
+        }
+        if (state.memoryFd >= 0) {
+            close(state.memoryFd);
+        }
+    }
+};
 
 void WriteAll(int fd, const char* text, size_t length) {
     while (length > 0) {
@@ -180,6 +217,18 @@ void HandleNativeCrash(int signal, siginfo_t* info, void* context) {
             WriteField(fd, "Program counter: ", machineContext->pc, true);
             WriteField(fd, "Stack pointer: ", machineContext->sp, true);
             WriteField(fd, "Link register: ", machineContext->regs[30], true);
+            WriteField(fd, "Stack low: ", sThreadDiagnostics.stackLow, true);
+            WriteField(fd, "Stack high: ", sThreadDiagnostics.stackHigh, true);
+            WriteText(fd, "Frame chain (raw return addresses; may contain authentication bits):\n");
+            size_t frameCount = Ship::CrashDiagnostics::WalkFrames(
+                machineContext->regs[29], sThreadDiagnostics.stackLow, sThreadDiagnostics.stackHigh,
+                [](uintptr_t address, void* buffer, size_t size) {
+                    return sThreadDiagnostics.memoryFd >= 0 &&
+                           pread(sThreadDiagnostics.memoryFd, buffer, size, static_cast<off_t>(address)) ==
+                               static_cast<ssize_t>(size);
+                },
+                [fd](uintptr_t address) { WriteField(fd, "  return pc: ", address, true); });
+            WriteField(fd, "Captured frames: ", frameCount);
             WriteText(fd, "Registers:\n");
             for (size_t i = 0; i < 31; i++) {
                 WriteText(fd, "  X");
@@ -196,6 +245,21 @@ void HandleNativeCrash(int signal, siginfo_t* info, void* context) {
         close(fd);
     }
 
+    // Preserve Android's native tombstone reporter and its original ucontext.
+    // The Java reporter can recover that trace through ApplicationExitInfo.
+    const struct sigaction previous = sPreviousHandlers[signal];
+    sigaction(signal, &previous, nullptr);
+    if (previous.sa_handler != SIG_DFL && previous.sa_handler != SIG_IGN) {
+        if ((previous.sa_flags & SA_SIGINFO) != 0) {
+            previous.sa_sigaction(signal, info, context);
+        } else {
+            previous.sa_handler(signal);
+        }
+    }
+    struct sigaction fatal = {};
+    fatal.sa_handler = SIG_DFL;
+    sigemptyset(&fatal.sa_mask);
+    sigaction(signal, &fatal, nullptr);
     raise(signal);
 }
 
@@ -203,8 +267,8 @@ void InstallSignalHandler(int signal) {
     struct sigaction action = {};
     sigemptyset(&action.sa_mask);
     action.sa_sigaction = HandleNativeCrash;
-    action.sa_flags = SA_SIGINFO | SA_RESETHAND;
-    sigaction(signal, &action, nullptr);
+    action.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
+    sigaction(signal, &action, &sPreviousHandlers[signal]);
 }
 
 void CopyJavaString(JNIEnv* env, jstring source, char* destination, size_t destinationSize) {
@@ -230,11 +294,15 @@ extern "C" void JNICALL Java_com_twoshipfork_mm_MainActivity_nativeInstallCrashR
     CopyJavaString(env, reportPath, sCrashReportPath, sizeof(sCrashReportPath));
     CopyJavaString(env, versionName, sCrashVersion, sizeof(sCrashVersion));
 
-    InstallSignalHandler(SIGABRT);
-    InstallSignalHandler(SIGBUS);
-    InstallSignalHandler(SIGFPE);
-    InstallSignalHandler(SIGILL);
-    InstallSignalHandler(SIGSEGV);
+    Ship::Mobile::InitThreadDiagnostics();
+    if (!sHandlersInstalled) {
+        InstallSignalHandler(SIGABRT);
+        InstallSignalHandler(SIGBUS);
+        InstallSignalHandler(SIGFPE);
+        InstallSignalHandler(SIGILL);
+        InstallSignalHandler(SIGSEGV);
+        sHandlersInstalled = true;
+    }
 }
 
 extern "C" void JNICALL Java_com_twoshipfork_mm_MainActivity_nativeTestCrashReporter(JNIEnv*, jobject) {
@@ -247,6 +315,72 @@ extern "C" void JNICALL Java_com_twoshipfork_mm_MainActivity_nativeGamepadBackPr
 
 bool Ship::Mobile::ConsumeGamepadBackPress() {
     return sGamepadBackPressed.exchange(false);
+}
+
+void Ship::Mobile::InitThreadDiagnostics() {
+    thread_local ThreadDiagnosticsLifetime lifetime;
+    (void)lifetime;
+    auto& state = sThreadDiagnostics;
+    if (state.initialized) {
+        return;
+    }
+    state.initialized = true;
+    pthread_attr_t attributes;
+    if (pthread_getattr_np(pthread_self(), &attributes) == 0) {
+        void* base = nullptr;
+        size_t size = 0;
+        if (pthread_attr_getstack(&attributes, &base, &size) == 0) {
+            state.stackLow = reinterpret_cast<uintptr_t>(base);
+            state.stackHigh = state.stackLow + size;
+        }
+        pthread_attr_destroy(&attributes);
+    }
+    state.memoryFd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+    stack_t existing = {};
+    if (sigaltstack(nullptr, &existing) == 0 && (existing.ss_flags & SS_DISABLE) != 0) {
+        state.alternateStack = mmap(nullptr, ThreadDiagnostics::alternateSize, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (state.alternateStack != MAP_FAILED) {
+            stack_t alternate = {};
+            alternate.ss_sp = state.alternateStack;
+            alternate.ss_size = ThreadDiagnostics::alternateSize;
+            if (sigaltstack(&alternate, nullptr) != 0) {
+                munmap(state.alternateStack, ThreadDiagnostics::alternateSize);
+                state.alternateStack = MAP_FAILED;
+            }
+        }
+    }
+    stack_t installed = {};
+    if (sigaltstack(nullptr, &installed) == 0 && (installed.ss_flags & SS_DISABLE) == 0) {
+        state.alternateBytes = installed.ss_size;
+    }
+}
+
+void Ship::Mobile::LogMemorySample(size_t combinerCount) {
+    using Clock = std::chrono::steady_clock;
+    static auto start = Clock::now();
+    static auto next = start;
+    const auto now = Clock::now();
+    if (now < next) {
+        return;
+    }
+    next = now + std::chrono::seconds(30);
+    unsigned long totalPages = 0, residentPages = 0;
+    FILE* statm = fopen("/proc/self/statm", "r");
+    const bool rssAvailable = statm && fscanf(statm, "%lu %lu", &totalPages, &residentPages) == 2;
+    if (statm) {
+        fclose(statm);
+    }
+    const auto heap = mallinfo();
+    const uintptr_t currentStack = reinterpret_cast<uintptr_t>(&residentPages);
+    const auto& state = sThreadDiagnostics;
+    const size_t stackUsed = currentStack >= state.stackLow && currentStack < state.stackHigh
+                                 ? state.stackHigh - currentStack : 0;
+    SPDLOG_INFO("Android memory: elapsed_s={} rss_kib={} heap_allocated_kib={} combiners={} stack_sample_kib={} alt_stack_kib={} frame_reader={}",
+                std::chrono::duration_cast<std::chrono::seconds>(now - start).count(),
+                rssAvailable ? static_cast<int64_t>(residentPages * sysconf(_SC_PAGESIZE) / 1024) : -1,
+                heap.uordblks / 1024, combinerCount, stackUsed / 1024, state.alternateBytes / 1024,
+                state.memoryFd >= 0);
 }
 
 void Ship::Mobile::SetCrashContext(const char* context) {

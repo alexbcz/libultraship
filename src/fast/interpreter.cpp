@@ -12,6 +12,7 @@
 #endif
 
 #include <any>
+#include <chrono>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -28,6 +29,7 @@
 #include <string>
 
 #include "fast/interpreter.h"
+#include "fast/TextureBudget.h"
 #include "fast/lus_gbi.h"
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -41,6 +43,10 @@
 #include "libultraship/libultra/os.h"
 
 #include <spdlog/fmt/fmt.h>
+#ifdef __ANDROID__
+#include <sys/sysinfo.h>
+#include "ship/port/mobile/MobileImpl.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -475,6 +481,7 @@ std::shared_ptr<Ship::IResource> Interpreter::ResolveResourceCached(const char* 
 }
 
 void Interpreter::TextureCacheClear() {
+    mUploadingTexture = nullptr;
     for (const auto& entry : mTextureCache.map) {
         mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
     }
@@ -492,11 +499,29 @@ void Interpreter::ShaderCacheClear() {
     mRapi->ClearShaderCache();
 }
 
+// Only call between game states, after the last display list has completed.
+void Interpreter::ReleaseTextureCache() {
+    TextureCacheClear();
+    for (auto id : mTextureCache.free_texture_ids) {
+        mRapi->DeleteTexture(id);
+    }
+    mTextureCache.free_texture_ids.clear();
+    mRdp->texture_to_load = {};
+    for (auto& texture : mRdp->loaded_texture) {
+        texture = {};
+    }
+    std::fill(std::begin(mRdp->textures_changed), std::end(mRdp->textures_changed), true);
+    std::fill(std::begin(mRdp->palettes), std::end(mRdp->palettes), nullptr);
+    std::fill(std::begin(mRdp->palette_dram_addr), std::end(mRdp->palette_dram_addr), nullptr);
+}
+
 bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     TextureCacheMap::iterator it = mTextureCache.map.find(key);
     TextureCacheNode** n = &mRenderingState.mTextures[i];
 
     if (it != mTextureCache.map.end()) {
+        ++mTextureHits;
+        it->second.last_used_frame = mTextureFrame;
         mRapi->SelectTexture(i, it->second.texture_id);
         *n = &*it;
         mTextureCache.lru.splice(mTextureCache.lru.end(), mTextureCache.lru,
@@ -504,9 +529,14 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
         return true;
     }
 
+    ++mTextureMisses;
     if (mTextureCache.map.size() >= TEXTURE_CACHE_MAX_SIZE) {
+        ++mTextureEvictions;
         // Remove the texture that was least recently used
         it = mTextureCache.lru.front().it;
+        if (mUploadingTexture == &*it) {
+            mUploadingTexture = nullptr;
+        }
         mTextureCache.free_texture_ids.push_back(it->second.texture_id);
         for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
             if (mRenderingState.mTextures[j] == &*it)
@@ -527,6 +557,8 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
     it = mTextureCache.map.insert(std::make_pair(key, TextureCacheValue())).first;
     TextureCacheNode* node = &*it;
     node->second.texture_id = texture_id;
+    node->second.last_used_frame = mTextureFrame;
+    mUploadingTexture = node;
     node->second.lru_location = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
 
     mRapi->SelectTexture(i, texture_id);
@@ -550,6 +582,9 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
         bool again = false;
         for (auto it = mTextureCache.map.begin(bucket); it != mTextureCache.map.end(bucket); ++it) {
             if (it->first.texture_addr == origAddr) {
+                if (mUploadingTexture == &*it) {
+                    mUploadingTexture = nullptr;
+                }
                 for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
                     if (mRenderingState.mTextures[j] == &*it)
                         mRenderingState.mTextures[j] = nullptr;
@@ -665,7 +700,7 @@ void Interpreter::ImportTextureRgba16(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureRgba32(int tile, bool importReplacement) {
@@ -736,7 +771,7 @@ void Interpreter::ImportTextureRgba32(int tile, bool importReplacement) {
             i++;
         }
     }
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureIA4(int tile, bool importReplacement) {
@@ -781,7 +816,7 @@ void Interpreter::ImportTextureIA4(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureIA8(int tile, bool importReplacement) {
@@ -823,7 +858,7 @@ void Interpreter::ImportTextureIA8(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureIA16(int tile, bool importReplacement) {
@@ -873,7 +908,7 @@ void Interpreter::ImportTextureIA16(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureI4(int tile, bool importReplacement) {
@@ -925,7 +960,7 @@ void Interpreter::ImportTextureI4(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureI8(int tile, bool importReplacement) {
@@ -965,7 +1000,7 @@ void Interpreter::ImportTextureI8(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
@@ -1058,7 +1093,7 @@ void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
@@ -1139,7 +1174,7 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
         height = tile_h;
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::ImportTextureImg(int tile, bool importReplacement) {
@@ -1156,7 +1191,7 @@ void Interpreter::ImportTextureImg(int tile, bool importReplacement) {
 
     uint16_t width = metadata->width;
     uint16_t height = metadata->height;
-    mRapi->UploadTexture(addr, width, height);
+    UploadCachedTexture(addr, width, height);
 }
 
 void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
@@ -1203,7 +1238,7 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
 
     if (resultNewLineSize == 4 * width && resultNewHeight == height) {
         // Can use the texture directly since it has the correct dimensions
-        mRapi->UploadTexture(addr, width, height);
+        UploadCachedTexture(addr, width, height);
         return;
     }
 
@@ -1251,7 +1286,7 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
             uploadHeight = resultNewHeight;
         }
     }
-    mRapi->UploadTexture(mTexUploadBuffer, uploadWidth, uploadHeight);
+    UploadCachedTexture(mTexUploadBuffer, uploadWidth, uploadHeight);
 }
 
 void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
@@ -1455,7 +1490,7 @@ void Interpreter::ImportTextureMask(int i, int tile) {
         }
     }
 
-    mRapi->UploadTexture(mTexUploadBuffer, width, height);
+    UploadCachedTexture(mTexUploadBuffer, width, height);
 }
 
 void Interpreter::NormalizeVector(float v[3]) {
@@ -1942,9 +1977,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         cc_options |= SHADER_OPT(TEXEL1_BLEND);
     }
 
-    ColorCombinerKey key{};
-    key.combine_mode = mRdp->combine_mode;
-    key.options = cc_options;
+    const ColorCombinerKey key{ mRdp->combine_mode, cc_options, 0 };
 
     ColorCombiner* comb = LookupOrCreateColorCombiner(key);
 
@@ -4124,7 +4157,21 @@ bool gfx_set_timg_otr_filepath_handler_custom(F3DGfx** cmd0) {
         gfx->GfxDpSetTextureImage(fmt, size, width, fileName, texFlags, rawTexMetadata,
                                   reinterpret_cast<char*>(texture->ImageData));
     } else {
+#ifdef __ANDROID__
+        // Bound both storage and output when malformed packs request many paths.
+        static std::set<std::string> reportedPaths;
+        if (reportedPaths.size() < 64) {
+            const std::string path(fileName, strnlen(fileName, 256));
+            if (reportedPaths.insert(path).second) {
+                SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null: {}", path);
+                if (reportedPaths.size() == 64) {
+                    SPDLOG_WARN("Missing-texture path limit reached; suppressing further reports");
+                }
+            }
+        }
+#else
         SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null");
+#endif
     }
     return false;
 }
@@ -5012,6 +5059,17 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
 
     ucode_handler_index = UcodeHandlers::ucode_f3dex2;
 
+#ifdef __ANDROID__
+    struct sysinfo memory {};
+    const uint64_t physicalBytes = sysinfo(&memory) == 0 ? uint64_t(memory.totalram) * memory.mem_unit : 0;
+    const int overrideMiB = Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(
+        "gDeveloperTools.TextureBudgetMiB", 0);
+    mTextureBudgetBytes = TextureBudgetBytes(physicalBytes, overrideMiB);
+    SPDLOG_INFO("GPU texture budget: {} MiB (override: {}), maximum {} entries",
+                mTextureBudgetBytes == UINT64_MAX ? -1 : int64_t(mTextureBudgetBytes / (1024 * 1024)),
+                overrideMiB, TEXTURE_CACHE_MAX_SIZE);
+#endif
+
     // Pre-allocate texture cache buckets to prevent rehash-induced iterator invalidation.
     mTextureCache.map.reserve(TEXTURE_CACHE_MAX_SIZE);
 }
@@ -5067,6 +5125,10 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
+#ifdef __ANDROID__
+    Ship::Mobile::InitThreadDiagnostics();
+    Ship::Mobile::LogMemorySample(mColorCombinerPool.size());
+#endif
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {
@@ -5224,11 +5286,79 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
     }
 }
 
+void Interpreter::UploadCachedTexture(const uint8_t* pixels, uint32_t width, uint32_t height) {
+    if (mUploadingTexture != nullptr) {
+        mUploadingTexture->second.storage_bytes = TextureStorageBytes(width, height);
+    }
+    mRapi->UploadTexture(pixels, width, height);
+}
+
+void Interpreter::TrimTextureCache() {
+#ifdef __ANDROID__
+    uint64_t used = 0;
+    for (const auto& [key, texture] : mTextureCache.map) {
+        used += texture.storage_bytes;
+    }
+    // End-of-frame trimming never removes textures used by this frame or still bound.
+    // The budget is soft when the active scene itself exceeds it.
+    unsigned removed = 0;
+    for (auto lru = mTextureCache.lru.begin(); lru != mTextureCache.lru.end() &&
+         used > mTextureBudgetBytes && removed < 16;) {
+        auto texture = lru->it;
+        const bool bound = std::find(std::begin(mRenderingState.mTextures), std::end(mRenderingState.mTextures),
+                                     &*texture) != std::end(mRenderingState.mTextures);
+        if (!TextureCanBeEvicted(texture->second.last_used_frame, mTextureFrame, bound)) {
+            ++lru;
+            continue;
+        }
+        used -= texture->second.storage_bytes;
+        mRapi->DeleteTexture(texture->second.texture_id);
+        if (mUploadingTexture == &*texture) {
+            mUploadingTexture = nullptr;
+        }
+        mTextureCache.map.erase(texture);
+        lru = mTextureCache.lru.erase(lru);
+        ++removed;
+        ++mTextureEvictions;
+    }
+    // Recycled IDs can still own storage after a cache clear or deletion.
+    for (auto id : mTextureCache.free_texture_ids) {
+        mRapi->DeleteTexture(id);
+    }
+    mTextureCache.free_texture_ids.clear();
+#ifdef TWO_SHIP_PERFORMANCE_TEST
+    using Clock = std::chrono::steady_clock;
+    static auto previous = Clock::now();
+    static double elapsedMs = 0;
+    static double longestMs = 0;
+    static uint64_t samples = 0;
+    const auto now = Clock::now();
+    const double intervalMs = std::chrono::duration<double, std::milli>(now - previous).count();
+    previous = now;
+    elapsedMs += intervalMs;
+    longestMs = std::max(longestMs, intervalMs);
+    ++samples;
+    if (elapsedMs >= 10000) {
+        SPDLOG_INFO("Performance: frame interval avg {:.2f} ms, max {:.2f} ms; GPU cache {} MiB / {} MiB, {} entries; hits {}, misses {}, evictions {}; combiners {}",
+                    elapsedMs / samples, longestMs, used / (1024 * 1024),
+                    mTextureBudgetBytes == UINT64_MAX ? -1 : int64_t(mTextureBudgetBytes / (1024 * 1024)),
+                    mTextureCache.map.size(), mTextureHits, mTextureMisses, mTextureEvictions, mColorCombinerPool.size());
+        elapsedMs = 0;
+        longestMs = 0;
+        samples = 0;
+        mTextureHits = mTextureMisses = mTextureEvictions = 0;
+    }
+#endif
+#endif
+}
+
 void Interpreter::EndFrame() {
     mRapi->EndFrame();
     mWapi->SwapBuffersBegin();
     mRapi->FinishRender();
     mWapi->SwapBuffersEnd();
+    TrimTextureCache();
+    ++mTextureFrame;
 }
 
 void gfx_set_target_ucode(UcodeHandlers ucode) {
